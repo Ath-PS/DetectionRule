@@ -1,76 +1,82 @@
-#Software test-list arrays
-[string[]]$SoftwareNameTestList = @(
-    "McAfee Endpoint Security Firewall",
-    "McAfee Endpoint Security Platform",
-    "McAfee Endpoint Security Threat Prevention",
-    "McAfee Endpoint Security Web Control"
-)
-[string[]]$SoftwareVersionTestList = @(
-    "10.7.0",
-    "10.7.0",
-    "10.7.0",
-    "10.7.0"
-)
+# Inline software requirements block
+$Config = @{
+    Software = @(
+        @{ Name = 'Name 1';   MinVersion = 'Version 1' }
+    )
+}
 
-##### DO NOT EDIT BELOW ####
+$Software = $Config.Software
+
+# Normalize and map to arrays
+[string[]]$RequiredSoftwareNames = @()
+[string[]]$RequiredSoftwareMinVersions = @()
+foreach ($item in $Software) {
+    $name = [string]$item['Name']
+    $ver  = [string]$item['MinVersion']
+    if ($null -ne $name) { $name = $name.Trim() }
+    if ($null -ne $ver)  { $ver  = $ver.Trim() }
+    $RequiredSoftwareNames += $name
+    $RequiredSoftwareMinVersions += $ver
+}
+
+# Ensure arrays are trimmed
+$RequiredSoftwareNames = @($RequiredSoftwareNames | ForEach-Object { if ($null -ne $_) { $_.Trim() } else { $_ } })
+$RequiredSoftwareMinVersions = @($RequiredSoftwareMinVersions | ForEach-Object { if ($null -ne $_) { $_.Trim() } else { $_ } })
+
 $ErrorActionPreference = 'SilentlyContinue'
-$Script:DetectionSuccessful = $Null
-$Script:SoftwareVersionTable = $Null
+$DetectionSuccessful = $Null
+$InstalledSoftwareTable = $Null
 
-#All possible registry paths containing un-install info
+# Registry uninstall paths
 [string[]]$RegistryUninstallPaths = @(
     'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall',
     'HKLM:\SOFTWARE\Wow6432Node\Microsoft\Windows\CurrentVersion\Uninstall'
 )
 
-#If test-list array element counts don't match, fail
-if (($SoftwareNameTestList.Count) -eq ($SoftwareVersionTestList.Count)) {
+# Quick helper to try-parse [version]
+function Convert-ToVersionOrNull {
+    param([string]$s)
+    if ([string]::IsNullOrWhiteSpace($s)) { return $null }
+    $v = $null
+    if ([version]::TryParse($s.Trim(), [ref]$v)) { return $v }
+    return $null
+}
 
-    #With each registry path build a table of installed software
+if (($RequiredSoftwareNames.Count) -eq ($RequiredSoftwareMinVersions.Count)) {
     foreach ($RegistryPath in $RegistryUninstallPaths) {
-        $RegistryFolders = (Get-ChildItem $RegistryPath -Name)
-        $SoftwareVersionTable += $(foreach ($Folder in $RegistryFolders) { (Get-ItemProperty -Path "$RegistryPath\$Folder") | Select-Object DisplayName, DisplayVersion })
+        $RegistryFolders = (Get-ChildItem $RegistryPath -Name -ErrorAction SilentlyContinue)
+        $InstalledSoftwareTable += foreach ($Folder in $RegistryFolders) { (Get-ItemProperty -Path (Join-Path -Path $RegistryPath -ChildPath $Folder) -ErrorAction SilentlyContinue) | Select-Object DisplayName, DisplayVersion }
     }
 
-    #Step through each test-list element reformat version data
-    for ($G = 0; $G -lt ($SoftwareNameTestList.Count); $G++) {
-        $SoftwareNameTestItem = $SoftwareNameTestList[$G]
-        $SoftwareVersionTestItem = $SoftwareVersionTestList[$G]
-        $SoftwareVersionTestItem = [System.Version]$SoftwareVersionTestItem
-        $SoftwareNameTestItemExists = $False
+    for ($G = 0; $G -lt ($RequiredSoftwareNames.Count); $G++) {
+        $RequiredSoftwareNameItem = $RequiredSoftwareNames[$G]
+        $RequiredSoftwareVersionItem = Convert-ToVersionOrNull -s $RequiredSoftwareMinVersions[$G]
+        $RequiredSoftwareNameItemExists = $False
 
-        #Step through each software installed element reformat version data
-        foreach ($Record in $SoftwareVersionTable) {
-            $SoftwareNameInstalled = ($Record.DisplayName)
-            $SoftwareVersionInstalled = ($Record.DisplayVersion)
-            $SoftwareVersionInstalled = [System.Version]$SoftwareVersionInstalled
+        foreach ($Record in $InstalledSoftwareTable) {
+            $SoftwareNameInstalledRaw = [string]$Record.DisplayName
+            $SoftwareNameInstalled = if ($null -ne $SoftwareNameInstalledRaw) { $SoftwareNameInstalledRaw.Trim() } else { $null }
+            $SoftwareNameInstalledNorm = if ($SoftwareNameInstalled) { $SoftwareNameInstalled.ToLowerInvariant() } else { $null }
 
-            #Compare test-list software name and version number against installed software
-            #Installed software version must be >= the test-list version, this prevents detection method failure if the installed software is newer than that being installed.
-            #At first failure break out of loop, detection has failed
-            if ($SoftwareNameInstalled -eq $SoftwareNameTestItem) {
-                $SoftwareNameTestItemExists = $True
-                if (($SoftwareVersionInstalled -ge $SoftwareVersionTestItem) -and (!($DetectionSuccessful -eq $False))) {
+            $SoftwareVersionInstalledRaw = [string]$Record.DisplayVersion
+            $SoftwareVersionInstalled = Convert-ToVersionOrNull -s $SoftwareVersionInstalledRaw
+
+            $RequiredNameNorm = if ($null -ne $RequiredSoftwareNameItem) { $RequiredSoftwareNameItem.Trim().ToLowerInvariant() } else { $null }
+            if ($SoftwareNameInstalledNorm -eq $RequiredNameNorm) {
+                $RequiredSoftwareNameItemExists = $True
+                if (($SoftwareVersionInstalled -ne $null) -and ($RequiredSoftwareVersionItem -ne $null) -and ($SoftwareVersionInstalled -ge $RequiredSoftwareVersionItem) -and (!($DetectionSuccessful -eq $False))) {
                     $DetectionSuccessful = $True
-                }
-                else {
-                    $DetectionSuccessful = $False
-                }
+                } else { $DetectionSuccessful = $False }
                 break
             }
         }
 
-        if ($SoftwareNameTestItemExists -eq $False) {
-            $DetectionSuccessful = $False
-            break
-        }
+        if ($RequiredSoftwareNameItemExists -eq $False) { $DetectionSuccessful = $False; break }
     }
 }
-else {
-    $DetectionSuccessful = $False
-}
+} else { $DetectionSuccessful = $False }
 
 if ($DetectionSuccessful) {
     Write-Output "Installed"
-}
-exit 0
+    exit 0
+} else { Write-Output "NotInstalled"; exit 1 }
